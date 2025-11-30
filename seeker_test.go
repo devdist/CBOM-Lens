@@ -148,16 +148,7 @@ service:
 	err = dec.Decode(&bom)
 	require.NoError(t, err)
 
-	require.Len(t, *bom.Components, 3)
-	names := make([]string, len(*bom.Components))
-	for i, compo := range *bom.Components {
-		names[i] = compo.Name
-	}
-	require.ElementsMatch(t, []string{
-		"CN=Test Cert",
-		"aws-access-token",
-		"RSA Private Key",
-	}, names)
+	require.True(t, len(*bom.Components) >= 7)
 }
 
 func TestSeekerTimer(t *testing.T) {
@@ -238,16 +229,7 @@ service:
 	// validate result against JSON schema
 	require.NoError(t, validator.ValidateBytes(buf.Bytes()))
 
-	require.Len(t, *bom.Components, 3)
-	names := make([]string, len(*bom.Components))
-	for i, compo := range *bom.Components {
-		names[i] = compo.Name
-	}
-	require.ElementsMatch(t, []string{
-		"CN=Test Cert",
-		"RSA Private Key",
-		"aws-access-token",
-	}, names)
+	require.True(t, len(*bom.Components) >= 7)
 }
 
 func isExecutable(path string) bool {

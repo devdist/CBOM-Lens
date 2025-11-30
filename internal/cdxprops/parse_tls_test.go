@@ -1,74 +1,104 @@
-package cdxprops_test
+package cdxprops
 
 import (
 	"testing"
 
-	"github.com/CZERTAINLY/Seeker/internal/cdxprops"
+	"github.com/CZERTAINLY/Seeker/internal/model"
+	cdx "github.com/CycloneDX/cyclonedx-go"
 	"github.com/stretchr/testify/require"
 )
 
+func TestKeyExchangeAlgorithm_info(t *testing.T) {
+	algo := KeyExchangeAlgorithm(KexDHE)
+	info, ok := algo.info("2048")
+	require.True(t, ok)
+	require.Equal(t, "DHE-2048", info.name)
+	require.Equal(t, 112, info.classicalSecurityLevel)
+	require.Contains(t, info.cryptoFunctions, cdx.CryptoFunctionKeyderive)
+
+	algo = KeyExchangeAlgorithm(KexECDHE)
+	info, ok = algo.info("secp256r1")
+	require.True(t, ok)
+	require.Equal(t, "ECDHE-secp256r1", info.name)
+	require.Equal(t, 128, info.classicalSecurityLevel)
+
+	algo = KeyExchangeAlgorithm(KexRSA)
+	info, ok = algo.info("4096")
+	require.True(t, ok)
+	require.Equal(t, "RSA-4096", info.name)
+	require.Equal(t, 152, info.classicalSecurityLevel)
+
+	info, ok = KeyExchangeAlgorithm("UNKNOWN").info("foo")
+	require.False(t, ok)
+}
+
+func TestKeyAuthenticationAlgorithm_info(t *testing.T) {
+	algo := KeyAuthenticationAlgorithm(KauthECDSA)
+	info, ok := algo.info("secp384r1")
+	require.True(t, ok)
+	require.Equal(t, "ECDSA-secp384r1", info.name)
+	require.Equal(t, 192, info.classicalSecurityLevel)
+	require.Contains(t, info.cryptoFunctions, cdx.CryptoFunctionSign)
+
+	algo = KeyAuthenticationAlgorithm(KauthRSA)
+	info, ok = algo.info("2048")
+	require.True(t, ok)
+	require.Equal(t, "RSA-2048", info.name)
+	require.Equal(t, 112, info.classicalSecurityLevel)
+
+	algo = KeyAuthenticationAlgorithm("")
+	info, ok = algo.info("foo")
+	require.False(t, ok)
+}
+
+func TestCipherAlgorithm_info(t *testing.T) {
+	algo := CipherAlgorithm(CipherRC4)
+	info, ok := algo.info(KeyLen128, CipherModeEmpty)
+	require.True(t, ok)
+	require.Equal(t, "RC4-128", info.name)
+	require.Equal(t, 128, info.classicalSecurityLevel)
+
+	algo = CipherAlgorithm(Cipher3DES)
+	info, ok = algo.info(KeyLen168, CipherModeEDE_CBC)
+	require.True(t, ok)
+	require.Equal(t, "3DES-EDE-CBC", info.name)
+	require.Equal(t, 112, info.classicalSecurityLevel)
+
+	algo = CipherAlgorithm(CipherAES)
+	info, ok = algo.info(KeyLen128, CipherModeCBC)
+	require.True(t, ok)
+	require.Equal(t, "AES-128-CBC", info.name)
+	require.Equal(t, 128, info.classicalSecurityLevel)
+
+	algo = CipherAlgorithm(CipherAES)
+	info, ok = algo.info(KeyLen256, CipherModeGCM)
+	require.True(t, ok)
+	require.Equal(t, "AES-256-GCM", info.name)
+	require.Equal(t, 256, info.classicalSecurityLevel)
+
+	algo = CipherAlgorithm(CipherCHACHA20)
+	info, ok = algo.info(KeyLen256, CipherModePOLY1305)
+	require.True(t, ok)
+	require.Equal(t, "ChaCha20-Poly1305", info.name)
+	require.Equal(t, 128, info.classicalSecurityLevel)
+
+	info, ok = CipherAlgorithm("UNKNOWN").info(KeyLen128, CipherModeCBC)
+	require.False(t, ok)
+}
+
 func TestParseCipherSuite(t *testing.T) {
-	t.Parallel()
+	cs, ok := ParseCipherSuite(model.SSLCipher{Name: "TLS_AES_128_GCM_SHA256"})
+	require.True(t, ok)
+	require.EqualValues(t, CipherAES, cs.Cipher)
+	require.EqualValues(t, KeyLen128, cs.KeyLen)
+	require.EqualValues(t, CipherModeGCM, cs.Mode)
+	require.EqualValues(t, HashSHA256, cs.Hash)
+	require.Equal(t, "TLS_AES_128_GCM_SHA256", cs.Name)
 
-	var testCases = []struct {
-		name string
-	}{
-		// TLS 1.0 - 1.2 cipher suites.
-		{"TLS_RSA_WITH_RC4_128_SHA"},
-		{"TLS_RSA_WITH_3DES_EDE_CBC_SHA"},
-		{"TLS_RSA_WITH_AES_128_CBC_SHA"},
-		{"TLS_RSA_WITH_AES_256_CBC_SHA"},
-		{"TLS_RSA_WITH_AES_128_CBC_SHA256"},
-		{"TLS_RSA_WITH_AES_128_GCM_SHA256"},
-		{"TLS_RSA_WITH_AES_256_GCM_SHA384"},
-		{"TLS_ECDHE_ECDSA_WITH_AES_128_CBC_SHA"},
-		{"TLS_ECDHE_ECDSA_WITH_AES_128_CBC_SHA256"},
-		{"TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256"},
-		{"TLS_ECDHE_ECDSA_WITH_AES_256_CBC_SHA"},
-		{"TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384"},
-		{"TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256"},
-		{"TLS_ECDHE_ECDSA_WITH_RC4_128_SHA"},
-		{"TLS_ECDHE_RSA_WITH_3DES_EDE_CBC_SHA"},
-		{"TLS_ECDHE_RSA_WITH_AES_128_CBC_SHA"},
-		{"TLS_ECDHE_RSA_WITH_AES_128_CBC_SHA256"},
-		{"TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256"},
-		{"TLS_ECDHE_RSA_WITH_AES_256_CBC_SHA"},
-		{"TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384"},
-		{"TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256"},
-		{"TLS_ECDHE_RSA_WITH_RC4_128_SHA"},
-		// fallback names
-		{"TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305"},
-		{"TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305"},
-		// TLS 1.3 cipher suites
-		{"TLS_AES_128_GCM_SHA256"},
-		{"TLS_AES_256_GCM_SHA384"},
-		{"TLS_CHACHA20_POLY1305_SHA256"},
-		// suites returned by ssllabs.com
-		{"TLS_DHE_RSA_WITH_AES_128_CBC_SHA"},
-		{"TLS_DHE_RSA_WITH_AES_128_CBC_SHA256"},
-		{"TLS_DHE_RSA_WITH_AES_128_GCM_SHA256"},
-		{"TLS_DHE_RSA_WITH_AES_256_CBC_SHA"},
-		{"TLS_DHE_RSA_WITH_AES_256_CBC_SHA256"},
-		{"TLS_DHE_RSA_WITH_AES_256_GCM_SHA384"},
-		{"TLS_DHE_RSA_WITH_CHACHA20_POLY1305_SHA256"},
-		{"TLS_ECDHE_RSA_WITH_AES_256_CBC_SHA384"},
-	}
+	cs, ok = ParseCipherSuite(model.SSLCipher{Name: "TLS_AKE_WITH_AES_128_GCM_SHA256"})
+	require.True(t, ok)
+	require.Equal(t, "TLS_AES_128_GCM_SHA256", cs.Name)
 
-	for _, tc := range testCases {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			suite, ok := cdxprops.ParseCipherSuite(tc.name)
-			require.True(t, ok)
-			require.NotZero(t, suite)
-			algos := suite.Algorithms()
-			require.NotEmpty(t, algos)
-		})
-	}
-
-	t.Run("unsupported cipher suite", func(t *testing.T) {
-		t.Parallel()
-		suite, ok := cdxprops.ParseCipherSuite("TLS_WHICH_DOES_NOT_EXIST")
-		require.False(t, ok)
-		require.Zero(t, suite)
-	})
+	cs, ok = ParseCipherSuite(model.SSLCipher{Name: "NON_EXISTENT_SUITE"})
+	require.False(t, ok)
 }

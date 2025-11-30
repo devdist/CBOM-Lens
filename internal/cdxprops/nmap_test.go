@@ -1,450 +1,181 @@
-package cdxprops_test
+package cdxprops
 
 import (
-	"bytes"
-	"crypto/x509"
-	"encoding/json"
-	"encoding/pem"
 	"testing"
 
-	"github.com/CZERTAINLY/Seeker/internal/cdxprops"
+	"github.com/CZERTAINLY/Seeker/internal/cdxprops/czertainly"
 	"github.com/CZERTAINLY/Seeker/internal/model"
 
 	cdx "github.com/CycloneDX/cyclonedx-go"
+
 	"github.com/stretchr/testify/require"
 )
 
-func TestParseSSHAlgorithm(t *testing.T) {
-	t.Parallel()
-
-	_, ok := cdxprops.ParseSSHAlgorithm("unknown-algorithm")
-	require.False(t, ok)
-
-	algo, ok := cdxprops.ParseSSHAlgorithm("ecdsa-sha2-nistp256")
-	require.True(t, ok)
-	exp := cdx.CryptoAlgorithmProperties{
-		Primitive:              cdx.CryptoPrimitiveSignature,
-		ParameterSetIdentifier: "nistp256@1.2.840.10045.3.1.7",
-		Curve:                  "nistp256",
-		CryptoFunctions:        &[]cdx.CryptoFunction{cdx.CryptoFunctionVerify},
+func TestParseTLSVersion(t *testing.T) {
+	tests := []struct {
+		input    string
+		expected TLSInfo
+	}{
+		{"TLSv1.3", TLSInfo{"tls", "1.3", "1.3.6.1.5.5.7.6.2"}},
+		{"TLSv1.2", TLSInfo{"tls", "1.2", "1.3.6.1.5.5.7.6.1"}},
+		{"SSLv3", TLSInfo{"ssl", "3.0", "1.3.6.1.4.1.311.10.3.2"}},
+		{"TLS 1.0", TLSInfo{"tls", "1.0", "1.3.6.1.4.1.311.10.3.3"}},
+		{"unknown", TLSInfo{"n/a", "n/a", "n/a"}},
 	}
-	require.Equal(t, exp, algo)
+
+	for _, tt := range tests {
+		t.Run(tt.input, func(t *testing.T) {
+			result := ParseTLSInfo(tt.input)
+			require.Equal(t, tt.expected, result)
+		})
+	}
 }
 
 func TestParseSSHHostKey(t *testing.T) {
-	_, err := cdxprops.ParseSSHHostKey(model.SSHHostKey{
-		Type: "unsupported-algo",
-		Bits: "0",
-	})
-	require.Error(t, err)
-
 	key := model.SSHHostKey{
-		Type:        "ecdsa-sha2-nistp256",
+		Type:        "ssh-ed25519",
 		Bits:        "256",
-		Key:         "AAAA-test-public-key",
-		Fingerprint: "SHA256:dummyfingerprint",
+		Key:         "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIE",
+		Fingerprint: "aa:bb:cc:dd",
 	}
 
-	compo, err := cdxprops.ParseSSHHostKey(key)
-	require.NoError(t, err)
+	t.Run("without czertainly properties", func(t *testing.T) {
+		c := NewConverter().WithCzertainlyExtensions(false)
 
-	require.Equal(t, "crypto/ssh-hostkey/"+key.Type+"@"+key.Bits, compo.BOMRef)
-	require.Equal(t, key.Type, compo.Name)
-	require.Equal(t, cdx.ComponentTypeCryptographicAsset, compo.Type)
-	require.NotNil(t, compo.CryptoProperties)
+		compo := c.ParseSSHHostKey(key)
+		require.Equal(t, "crypto/algorithm/ssh-ed25519@256", compo.BOMRef)
+		require.Equal(t, "ssh-ed25519", compo.Name)
+		require.Equal(t, cdx.ComponentTypeCryptographicAsset, compo.Type)
+		require.NotNil(t, compo.CryptoProperties)
+		require.Equal(t, cdx.CryptoAssetTypeAlgorithm, compo.CryptoProperties.AssetType)
+		require.NotNil(t, compo.CryptoProperties.AlgorithmProperties)
+		require.Equal(t, "ed25519@1.3.101.112", compo.CryptoProperties.AlgorithmProperties.ParameterSetIdentifier)
+		require.Equal(t, "ed25519@1.3.101.112", compo.CryptoProperties.OID)
+		require.Nil(t, compo.Properties)
+	})
 
-	cp := compo.CryptoProperties
-	require.Equal(t, cdx.CryptoAssetTypeAlgorithm, cp.AssetType)
-	require.NotNil(t, cp.AlgorithmProperties)
+	t.Run("with czertainly properties", func(t *testing.T) {
+		c := NewConverter().WithCzertainlyExtensions(true)
 
-	algo := cp.AlgorithmProperties
-	require.Equal(t, cdx.CryptoPrimitiveSignature, algo.Primitive)
-	require.Equal(t, "nistp256@1.2.840.10045.3.1.7", algo.ParameterSetIdentifier)
-	require.Equal(t, "nistp256", algo.Curve)
-	require.Equal(t, algo.ParameterSetIdentifier, cp.OID)
-
-	props := map[string]string{}
-	if compo.Properties != nil {
-		for _, p := range *compo.Properties {
-			props[p.Name] = p.Value
+		compo := c.ParseSSHHostKey(key)
+		require.NotNil(t, compo.Properties)
+		props := *compo.Properties
+		// Expect czertainly added content and fingerprint properties
+		foundContent := false
+		foundFingerprint := false
+		for _, p := range props {
+			if p.Name == czertainly.SSHHostKeyContent {
+				require.Equal(t, key.Key, p.Value)
+				foundContent = true
+			}
+			if p.Name == czertainly.SSHHostKeyFingerprintContent {
+				require.Equal(t, key.Fingerprint, p.Value)
+				foundFingerprint = true
+			}
 		}
-	}
-	require.Equal(t, key.Key, props[cdxprops.CzertainlyComponentSSHHostKeyContent])
-	require.Equal(t, key.Fingerprint, props[cdxprops.CzertainlyComponentSSHHostKeyFingerprintContent])
+		require.True(t, foundContent)
+		require.True(t, foundFingerprint)
+	})
 }
 
-func TestParseTLSVersion(t *testing.T) {
+func TestParseTLSInfo(t *testing.T) {
 	tests := []struct {
-		scenario     string
-		given        string
-		wantProtocol string
-		wantVersion  string
+		input    string
+		expected TLSInfo
 	}{
-		{
-			scenario:     "parse TLSv1.3",
-			given:        "TLSv1.3",
-			wantProtocol: "tls",
-			wantVersion:  "1.3",
-		},
-		{
-			scenario:     "parse SSLv2",
-			given:        "SSLv2",
-			wantProtocol: "ssl",
-			wantVersion:  "2.0",
-		},
-		{
-			scenario:     "parse alternative format",
-			given:        "TLS 1.3",
-			wantProtocol: "tls",
-			wantVersion:  "1.3",
-		},
-		{
-			scenario:     "unknown format",
-			given:        "unknown",
-			wantProtocol: "n/a",
-			wantVersion:  "n/a",
-		},
+		{"TLSv1.3", TLSInfo{Name: "tls", Version: "1.3", OID: "1.3.6.1.5.5.7.6.2"}},
+		{"SSLv3", TLSInfo{Name: "ssl", Version: "3.0", OID: "1.3.6.1.4.1.311.10.3.2"}},
+		{"TLS 1.2", TLSInfo{Name: "tls", Version: "1.2", OID: "1.3.6.1.5.5.7.6.1"}},
+		{"unknown", TLSInfo{Name: "n/a", Version: "n/a", OID: "n/a"}},
 	}
-
 	for _, tt := range tests {
-		t.Run(tt.scenario, func(t *testing.T) {
-			protocol, version := cdxprops.ParseTLSVersion(tt.given)
-			require.Equal(t, tt.wantProtocol, protocol)
-			require.Equal(t, tt.wantVersion, version)
-		})
+		info := ParseTLSInfo(tt.input)
+		require.Equal(t, tt.expected, info)
 	}
+}
+
+func TestPublicKeySizeFromPkeyRef(t *testing.T) {
+	require.Equal(t, "2048", publicKeySizeFromPkeyRef("crypto/algorithm/rsa-2048@sha256:foo"))
+	require.Equal(t, "secp256r1", publicKeySizeFromPkeyRef("crypto/algorithm/ecdsa-secp256r1@sha256:bar"))
+	require.Equal(t, "", publicKeySizeFromPkeyRef("crypto/algorithm/unknown@sha256:baz"))
+	require.Equal(t, "", publicKeySizeFromPkeyRef(""))
+}
+
+func TestParseSSHAlgorithm(t *testing.T) {
+	prop := parseSSHAlgorithm("ecdsa-sha2-nistp256")
+	require.Equal(t, "nistp256@1.2.840.10045.3.1.7", prop.ParameterSetIdentifier)
+	require.Equal(t, cdx.CryptoPrimitiveSignature, prop.Primitive)
+	require.NotNil(t, prop.CryptoFunctions)
+
+	prop = parseSSHAlgorithm("ssh-ed25519")
+	require.Equal(t, "ed25519@1.3.101.112", prop.ParameterSetIdentifier)
+
+	prop = parseSSHAlgorithm("unknown-algo")
+	require.Equal(t, "unknown", prop.ParameterSetIdentifier)
+	require.Equal(t, "", prop.Curve)
+}
+
+func TestParseSSHHostKey2(t *testing.T) {
+	cv := NewConverter()
+	key := model.SSHHostKey{Type: "ecdsa-sha2-nistp256", Bits: "256"}
+	compo := cv.ParseSSHHostKey(key)
+	require.Equal(t, "crypto/algorithm/ecdsa-sha2-nistp256@256", compo.BOMRef)
+	require.Equal(t, "ecdsa-sha2-nistp256", compo.Name)
+	require.Equal(t, cdx.ComponentTypeCryptographicAsset, compo.Type)
+	require.NotNil(t, compo.CryptoProperties)
+	require.Equal(t, cdx.CryptoAssetTypeAlgorithm, compo.CryptoProperties.AssetType)
+	require.Equal(t, "nistp256@1.2.840.10045.3.1.7", compo.CryptoProperties.OID)
 }
 
 func TestParseTLSCiphers(t *testing.T) {
-	tests := []struct {
-		scenario   string
-		given      []string
-		wantLen    int
-		wantAlgos  []cdx.BOMReference // algorithms for first cipher
-		wantIdents []string           // identifiers for first cipher
-	}{
-		{
-			scenario: "valid cipher suites",
-			given: []string{
-				"TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384",
-				"TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256",
-			},
-			wantLen: 2,
-			wantAlgos: []cdx.BOMReference{
-				"crypto/algorithm/ecdh-curve25519@1.3.132.1.12",
-				"crypto/algorithm/rsa-2048@1.2.840.113549.1.1.1",
-				"crypto/algorithm/aes-256-gcm@2.16.840.1.101.3.4.1.46",
-				"crypto/algorithm/sha-384@2.16.840.1.101.3.4.2.2",
-			},
-			wantIdents: []string{"0xC0", "0x30"},
-		},
-		{
-			scenario: "mixed valid and invalid ciphers",
-			given: []string{
-				"TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384",
-				"INVALID_CIPHER_SUITE",
-			},
-			wantLen: 1,
-			wantAlgos: []cdx.BOMReference{
-				"crypto/algorithm/ecdh-curve25519@1.3.132.1.12",
-				"crypto/algorithm/rsa-2048@1.2.840.113549.1.1.1",
-				"crypto/algorithm/aes-256-gcm@2.16.840.1.101.3.4.1.46",
-				"crypto/algorithm/sha-384@2.16.840.1.101.3.4.2.2",
-			},
-
-			wantIdents: []string{"0xC0", "0x30"},
-		},
+	cv := NewConverter()
+	ciphers := []model.SSLCipher{
+		{Name: "TLS_AES_128_GCM_SHA256"},
+		{Name: "TLS_RSA_WITH_AES_128_CBC_SHA"},
 	}
-
-	for _, tt := range tests {
-		t.Run(tt.scenario, func(t *testing.T) {
-			resultp := cdxprops.ParseTLSCiphers(t.Context(), tt.given)
-			require.NotNil(t, resultp)
-			result := *resultp
-
-			// Check the length of returned slice
-			require.Equal(t, tt.wantLen, len(result))
-
-			if len(result) > 0 {
-				// Check algorithms of first cipher suite
-				require.NotNil(t, result[0].Algorithms)
-				require.ElementsMatch(t, tt.wantAlgos, *result[0].Algorithms)
-
-				// Check identifiers of first cipher suite
-				require.NotNil(t, result[0].Identifiers)
-				require.ElementsMatch(t, tt.wantIdents, *result[0].Identifiers)
-			}
-		})
-	}
+	suites := cv.parseTLSCiphers(t.Context(), ciphers, "")
+	require.Len(t, suites, 2)
+	require.Equal(t, "TLS_AES_128_GCM_SHA256", suites[0].name)
+	require.Equal(t, "TLS_RSA_WITH_AES_128_CBC_SHA", suites[1].name)
+	require.NotEmpty(t, suites[0].identifiers)
+	require.NotEmpty(t, suites[0].compos)
 }
 
-func TestParseNmap_TLS(t *testing.T) {
-	t.Parallel()
-
-	nmap := model.Nmap{
-		Address: "127.0.0.1",
-		Status:  "up",
-		Ports: []model.NmapPort{
-			{
-				ID:       40645,
-				State:    "open",
-				Protocol: "tcp",
-				Service: model.NmapService{
-					Name:    "ssl",
-					Product: "",
-					Version: "",
-				},
-				Ciphers: []model.SSLEnumCiphers{
-					{
-						Name: "TLSv1.2",
-						Ciphers: []string{
-							"TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256",
-							"TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256",
-							"TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384",
-							"TLS_ECDHE_RSA_WITH_AES_128_CBC_SHA",
-							"TLS_ECDHE_RSA_WITH_AES_256_CBC_SHA",
-						},
-					},
-					{
-						Name: "TLSv1.3",
-						Ciphers: []string{
-							"TLS_AKE_WITH_AES_128_GCM_SHA256",
-							"TLS_AKE_WITH_AES_256_GCM_SHA384",
-							"TLS_AKE_WITH_CHACHA20_POLY1305_SHA256",
-						},
-					},
-				},
-				TLSCerts: []model.CertHit{
-					pemHit{
-						Raw: []byte(`-----BEGIN CERTIFICATE-----
-MIIF7zCCA9egAwIBAgIUCMqEjHI4T6kthdMJu78jyoU0t7AwDQYJKoZIhvcNAQEL
-BQAwgYYxCzAJBgNVBAYTAlhYMRIwEAYDVQQIDAlTdGF0ZU5hbWUxETAPBgNVBAcM
-CENpdHlOYW1lMRQwEgYDVQQKDAtDb21wYW55TmFtZTEbMBkGA1UECwwSQ29tcGFu
-eVNlY3Rpb25OYW1lMR0wGwYDVQQDDBRDb21tb25OYW1lT3JIb3N0bmFtZTAeFw0y
-NTEwMjAxMDE2MDdaFw0zNTEwMTgxMDE2MDdaMIGGMQswCQYDVQQGEwJYWDESMBAG
-A1UECAwJU3RhdGVOYW1lMREwDwYDVQQHDAhDaXR5TmFtZTEUMBIGA1UECgwLQ29t
-cGFueU5hbWUxGzAZBgNVBAsMEkNvbXBhbnlTZWN0aW9uTmFtZTEdMBsGA1UEAwwU
-Q29tbW9uTmFtZU9ySG9zdG5hbWUwggIiMA0GCSqGSIb3DQEBAQUAA4ICDwAwggIK
-AoICAQDHpyqMDyC06hAoKjTmXXzq3m9vBqXjzdGA21mTORmnmrZQO18W9SD1dq8N
-aAwjVAEDJcP2b5iwFTuBbwWJfKGWwNo3d68pakwnLdgWxtmKmGPkvBPSNCz1Nwa0
-bSty06lBUOs9kL8z5uKY23bi4dgyeO9cKJdkfwSVtxBT4l4c12PN1ymUlEp2Z8u5
-PEElg1x4yIxKtXqfw45/cClwANdvK5wHDrVQ8tz1nRuEU43K67l4tqTklY+JDogB
-3RiMfXHIpZ4Fk5XWB9/iyiUrYh53ojqchjAF+isNMuOCsfpl46hYlzcndL2Zm5dN
-I+A9fcWqzPT7a5kc13rkbyglCM1mazcl3bQFpoY9Y0Pabysr/nVychBA+9UOn9AA
-VBd1eCvmT4r8gWXRaJqgk051pyeHmp3toEhryRS2ONv2LJ9ifkvyBKHutWjLjugP
-MvgLAQjiSv1prAilsg2d6gM7Eli+OY6fpavelI1wG4b87mEhU1nTmLtM4d90jwNv
-iUk0sEGo2lMuIXP4epHifXWMG5/gUUcpuuEJAt1PkLYD6L1IbWFuRblR6MnenbcN
-c+QzUd0AcLJKKYgqPMxgPW0Jq+KPDC2eMOSQCD2KVOLsaJDnWbC2iyQYl6xcIhcp
-sLvRgsSuJj3cOVEulVIn18EJvsK1EtPNjs6vgDzulTziVQBuRwIDAQABo1MwUTAd
-BgNVHQ4EFgQUPQ5bXWzI8hql/z9uSFfuM0WmZuQwHwYDVR0jBBgwFoAUPQ5bXWzI
-8hql/z9uSFfuM0WmZuQwDwYDVR0TAQH/BAUwAwEB/zANBgkqhkiG9w0BAQsFAAOC
-AgEAHxfi/WrErM+UbIjmWJe3V1r63jsdCve6syr5aGN0aXDanzlDUAzB5t/httG0
-TQHh8gP4O0nHgtm368v1uZ0NaYHOGbvV+j0WQ4ulhJcBjYhobRU6XYM2sIrgJkLo
-jUmz2b7Y1Q8fBz3G4g1puu0s1AoRvZVwsVzQ3M6AMjLgEnDbQt89kTM8EnReXYq4
-6ar3ksiJMapmhuiGatVqQl6wyCtl9Ef6Tl8zaDyBvziDsl7hiN+FQxQFz8YgWWr7
-L/rNkuIid4uj/209vJm0BJMHjOx4abaTFZhdnTtTONvjD48LsKExFvdV0CWC5mnI
-lJ68kNDyOS59bdMqsPC9erFcheoAoT04/8rjXwTwXwEUyUEpuQXvctTGEAV19HzZ
-nKJKqXthLCxsTPteGzAexFPmMdOiZiCGMGIQQk9tirz4E1YEsLYMMNvre6LByuEp
-VR9gCh0N/FxU2+/HR2hMJLIbIMdQ1YlxVdsR3e3/RKUGnpwB0LqH2vQhg/WFFawO
-2013tnAGd5FCO3lrCwwo7cwvci/IyMex3GmZXyFNdddK/fKmdVJDr/k3O7QhuW2I
-U7/C9UWr2GEk6inRCF9unCHXUzQNLg56Mf0I8dw8PDJ3QbVywN0csSJxGqcGRoyM
-YhdzwN34rxXHelPfnN3lpV674QQnbYoVDDpfcZf+ZgkbvOk=
------END CERTIFICATE-----
-`),
-						Location: "127.0.0.1:40645",
-						Source:   "NMAP",
-					}.CertHit(t),
-				},
-				SSHHostKeys: nil,
-				Scripts:     nil,
-			},
-		},
+func TestCipherSuite_cdx(t *testing.T) {
+	compos := []cdx.Component{
+		{BOMRef: "ref1"},
+		{BOMRef: "ref2"},
 	}
-
-	compos := cdxprops.ParseNmap(t.Context(), nmap)
-	require.Len(t, compos, 3)
-
-	const expectedTLS12 = `
-{
-  "bom-ref": "crypto/protocol/tls@1.2",
-  "type": "cryptographic-asset",
-  "name": "TLSv1.2",
-  "cryptoProperties": {
-    "assetType": "protocol",
-    "protocolProperties": {
-      "type": "tls",
-      "version": "1.2",
-      "cipherSuites": [
-        {
-          "name": "TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256",
-          "algorithms": [
-            "crypto/algorithm/ecdh-curve25519@1.3.132.1.12",
-            "crypto/algorithm/rsa-2048@1.2.840.113549.1.1.1",
-            "crypto/algorithm/aes-128-gcm@2.16.840.1.101.3.4.1.6",
-            "crypto/algorithm/sha-256@2.16.840.1.101.3.4.2.1"
-          ],
-          "identifiers": [
-            "0xC0",
-            "0x2F"
-          ]
-        },
-        {
-          "name": "TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256",
-          "algorithms": [
-            "crypto/algorithm/ecdh-curve25519@1.3.132.1.12",
-            "crypto/algorithm/rsa-2048@1.2.840.113549.1.1.1",
-            "crypto/algorithm/chacha20-poly1305@ietf-rfc8439",
-            "crypto/algorithm/sha-256@2.16.840.1.101.3.4.2.1"
-          ],
-          "identifiers": [
-            "0xCC",
-            "0xA8"
-          ]
-        },
-        {
-          "name": "TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384",
-          "algorithms": [
-            "crypto/algorithm/ecdh-curve25519@1.3.132.1.12",
-            "crypto/algorithm/rsa-2048@1.2.840.113549.1.1.1",
-            "crypto/algorithm/aes-256-gcm@2.16.840.1.101.3.4.1.46",
-            "crypto/algorithm/sha-384@2.16.840.1.101.3.4.2.2"
-          ],
-          "identifiers": [
-            "0xC0",
-            "0x30"
-          ]
-        },
-        {
-          "name": "TLS_ECDHE_RSA_WITH_AES_128_CBC_SHA",
-          "algorithms": [
-            "crypto/algorithm/ecdh-curve25519@1.3.132.1.12",
-            "crypto/algorithm/rsa-2048@1.2.840.113549.1.1.1",
-            "crypto/algorithm/aes-128-cbc@2.16.840.1.101.3.4.1.2",
-            "crypto/algorithm/sha-1@1.3.14.3.2.26"
-          ],
-          "identifiers": [
-            "0xC0",
-            "0x13"
-          ]
-        },
-        {
-          "name": "TLS_ECDHE_RSA_WITH_AES_256_CBC_SHA",
-          "algorithms": [
-            "crypto/algorithm/ecdh-curve25519@1.3.132.1.12",
-            "crypto/algorithm/rsa-2048@1.2.840.113549.1.1.1",
-            "crypto/algorithm/aes-256-cbc@2.16.840.1.101.3.4.1.42",
-            "crypto/algorithm/sha-1@1.3.14.3.2.26"
-          ],
-          "identifiers": [
-            "0xC0",
-            "0x14"
-          ]
-        }
-      ]
-    }
-  }
-}
-`
-
-	const expectedTLS13 = `
-{
-  "bom-ref": "crypto/protocol/tls@1.3",
-  "type": "cryptographic-asset",
-  "name": "TLSv1.3",
-  "cryptoProperties": {
-    "assetType": "protocol",
-    "protocolProperties": {
-      "type": "tls",
-      "version": "1.3",
-      "cipherSuites": [
-        {
-          "name": "TLS_AKE_WITH_AES_128_GCM_SHA256",
-          "algorithms": [
-            "crypto/algorithm/aes-128-gcm@2.16.840.1.101.3.4.1.6",
-            "crypto/algorithm/sha-256@2.16.840.1.101.3.4.2.1"
-          ],
-          "identifiers": [
-            "0x13",
-            "0x1"
-          ]
-        },
-        {
-          "name": "TLS_AKE_WITH_AES_256_GCM_SHA384",
-          "algorithms": [
-            "crypto/algorithm/aes-256-gcm@2.16.840.1.101.3.4.1.46",
-            "crypto/algorithm/sha-384@2.16.840.1.101.3.4.2.2"
-          ],
-          "identifiers": [
-            "0x13",
-            "0x2"
-          ]
-        },
-        {
-          "name": "TLS_AKE_WITH_CHACHA20_POLY1305_SHA256",
-          "algorithms": [
-            "crypto/algorithm/chacha20-poly1305@ietf-rfc8439",
-            "crypto/algorithm/sha-256@2.16.840.1.101.3.4.2.1"
-          ],
-          "identifiers": [
-            "0x13",
-            "0x3"
-          ]
-        }
-      ]
-    }
-  }
-}
-`
-
-	testCases := []struct {
-		scenario string
-		given    cdx.Component
-		then     string
-	}{
-		{
-			scenario: "tls12",
-			given:    compos[0],
-			then:     expectedTLS12,
-		},
-		{
-			scenario: "tls13",
-			given:    compos[1],
-			then:     expectedTLS13,
-		},
-		{
-			scenario: "cert",
-			given:    compos[2],
-			then:     `{"type":"cryptographic-asset","name":"CN=CommonNameOrHostname,OU=CompanySectionName,O=CompanyName,L=CityName,ST=StateName,C=XX","version":"50188223309792639209962727766352873045328443312","properties":[{"name":"czertainly:component:certificate:source_format","value":"NMAP"},{"name":"czertainly:component:certificate:base64_content","value":"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"}],"evidence":{"occurrences":[{"location":"127.0.0.1:40645"}]},"cryptoProperties":{"assetType":"certificate","certificateProperties":{"subjectName":"CN=CommonNameOrHostname,OU=CompanySectionName,O=CompanyName,L=CityName,ST=StateName,C=XX","issuerName":"CN=CommonNameOrHostname,OU=CompanySectionName,O=CompanyName,L=CityName,ST=StateName,C=XX","notValidBefore":"2025-10-20T10:16:07Z","notValidAfter":"2035-10-18T10:16:07Z","signatureAlgorithmRef":"crypto/algorithm/sha-256-rsa@1.2.840.113549.1.1.11","subjectPublicKeyRef":"crypto/key/rsa-4096@1.2.840.113549.1.1.1","certificateFormat":"X.509","certificateExtension":".1:40645"}}}`,
-		},
+	cs := cipherSuite{
+		name:        "TLS_AES_128_GCM_SHA256",
+		compos:      compos,
+		identifiers: []string{"0x13", "0x01"},
 	}
-
-	for _, tc := range testCases {
-		t.Run(tc.scenario, func(t *testing.T) {
-			var buf bytes.Buffer
-			enc := json.NewEncoder(&buf)
-			require.NoError(t, enc.Encode(tc.given))
-			t.Logf("%s", buf.String())
-			require.JSONEq(t, tc.then, buf.String())
-		})
-	}
+	cdxSuite := cs.cdx()
+	require.Equal(t, "TLS_AES_128_GCM_SHA256", cdxSuite.Name)
+	require.NotNil(t, cdxSuite.Algorithms)
+	require.Len(t, *cdxSuite.Algorithms, 2)
+	require.Equal(t, "ref1", string((*cdxSuite.Algorithms)[0]))
+	require.Equal(t, []string{"0x13", "0x01"}, *cdxSuite.Identifiers)
 }
 
-type pemHit struct {
-	Raw      []byte
-	Source   string
-	Location string
-}
-
-func (h pemHit) CertHit(t *testing.T) model.CertHit {
-	t.Helper()
-	block, _ := pem.Decode(h.Raw)
-	require.NotNil(t, block, "failed to decode PEM block")
-	require.Equal(t, "CERTIFICATE", block.Type)
-	cert, err := x509.ParseCertificate(block.Bytes)
-	require.NoError(t, err)
-	return model.CertHit{
-		Cert:     cert,
-		Source:   h.Source,
-		Location: h.Location,
+func TestTlsCipherToCompos(t *testing.T) {
+	cv := NewConverter()
+	cipherEnum := model.SSLEnumCiphers{
+		Name: "TLSv1.3",
+		Ciphers: []model.SSLCipher{
+			{Name: "TLS_AES_128_GCM_SHA256"},
+			{Name: "TLS_AES_256_GCM_SHA384"},
+		},
 	}
+	compos := cv.tlsCipherToCompos(t.Context(), cipherEnum, nil, "")
+	require.NotEmpty(t, compos)
+	require.Equal(t, "TLSv1.3", compos[0].Name)
+	require.Equal(t, cdx.ComponentTypeCryptographicAsset, compos[0].Type)
+	require.NotNil(t, compos[0].CryptoProperties)
+	require.Equal(t, cdx.CryptoAssetTypeProtocol, compos[0].CryptoProperties.AssetType)
+	require.NotNil(t, compos[0].CryptoProperties.ProtocolProperties)
+	require.Equal(t, "1.3", compos[0].CryptoProperties.ProtocolProperties.Version)
+	require.NotNil(t, compos[0].CryptoProperties.ProtocolProperties.CipherSuites)
+	require.Len(t, *compos[0].CryptoProperties.ProtocolProperties.CipherSuites, 2)
 }

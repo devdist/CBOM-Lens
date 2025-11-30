@@ -15,9 +15,6 @@ import (
 	"github.com/CZERTAINLY/Seeker/internal/dscvr"
 	"github.com/CZERTAINLY/Seeker/internal/log"
 	"github.com/CZERTAINLY/Seeker/internal/model"
-	"github.com/CZERTAINLY/Seeker/internal/scanner/gitleaks"
-	"github.com/CZERTAINLY/Seeker/internal/scanner/pem"
-	"github.com/CZERTAINLY/Seeker/internal/scanner/x509"
 	"github.com/CZERTAINLY/Seeker/internal/service"
 
 	"github.com/spf13/cobra"
@@ -27,15 +24,11 @@ import (
 const defaultHttpServerGracefulPeriod = 5 * time.Second
 
 var (
-	leaksScanner *gitleaks.Scanner
-	x509Scanner  x509.Scanner
-	pemScanner   pem.Scanner
-
 	userConfigPath string // /default/config/path/seeker on given OS
 	configPath     string // actual config file used (if loaded)
 
 	flagConfigFilePath string // value of --config flag
-	flagVerbose        bool   //valur if --verbose flag
+	flagVerbose        bool   // value of --verbose flag
 )
 
 var rootCmd = &cobra.Command{
@@ -70,15 +63,6 @@ func init() {
 		panic(err)
 	}
 	userConfigPath = filepath.Join(d, "seeker")
-
-	// configure default scanner
-	// secrets:
-	leaksScanner, err = gitleaks.NewScanner()
-	if err != nil {
-		panic(err)
-	}
-
-	x509Scanner = x509.Scanner{}
 }
 
 func main() {
@@ -175,7 +159,7 @@ func doScan(cmd *cobra.Command, args []string) error {
 	slog.DebugContext(ctx, "_scan", "configPath", configPath)
 	slog.DebugContext(ctx, "_scan", "config", config)
 
-	seeker, err := NewSeeker(ctx, x509Scanner, leaksScanner, pemScanner, config)
+	seeker, err := NewSeeker(ctx, config)
 	if err != nil {
 		return err
 	}
